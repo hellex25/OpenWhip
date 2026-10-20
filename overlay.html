@@ -77,7 +77,14 @@ resize();
 window.addEventListener('resize', resize);
 
 let mouseX = 0, mouseY = 0;
-let prevMouseX = 0, prevMouseY = 0;
+let handleX = 0, handleY = 0;         // where the handle is pinned this physics step
+let prevHandleX = 0, prevHandleY = 0;
+let soundEnabled = true;
+
+// All tuning above is per 60 Hz step; run a fixed timestep so the whip feels
+// the same on 60/120/144 Hz displays.
+const STEP_MS = 1000 / 60;
+const MAX_FRAME_MS = 100; // don't spiral after the hidden window was throttled
 let whip = null;
 let dropping = false;
 let lastCrackTime = 0;
@@ -161,7 +168,7 @@ const wrapPi = a => {
 };
 
 function playCrackSound() {
-  if (!WHIP_CRACK_SOUNDS.length) return;
+  if (!soundEnabled || !WHIP_CRACK_SOUNDS.length) return;
   const src = WHIP_CRACK_SOUNDS[Math.floor(Math.random() * WHIP_CRACK_SOUNDS.length)];
   const a = new Audio(src);
   a.play().catch(() => {});
@@ -169,8 +176,8 @@ function playCrackSound() {
 
 function updateHandleAim() {
   if (dropping) return;
-  const mvx = mouseX - prevMouseX;
-  const mvy = mouseY - prevMouseY;
+  const mvx = handleX - prevHandleX;
+  const mvy = handleY - prevHandleY;
   const delta = clamp(
     mvx * P.handleAimByMouseX + mvy * P.handleAimByMouseY,
     -P.handleAimClamp,
@@ -315,10 +322,10 @@ function update() {
 
   // Pin handle to mouse
   if (!dropping) {
-    whip[0].x = mouseX;
-    whip[0].y = mouseY;
-    whip[0].px = mouseX;
-    whip[0].py = mouseY;
+    whip[0].x = handleX;
+    whip[0].y = handleY;
+    whip[0].px = handleX;
+    whip[0].py = handleY;
   }
 
   // Prevent rubber-band stretching spikes before constraints.
@@ -372,8 +379,8 @@ function update() {
     dropping = false;
     window.bridge.hideOverlay();
   }
-  prevMouseX = mouseX;
-  prevMouseY = mouseY;
+  prevHandleX = handleX;
+  prevHandleY = handleY;
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
@@ -428,25 +435,49 @@ function draw() {
 }
 
 // ── Main loop ───────────────────────────────────────────────────────────────
-function loop() {
-  update();
+let lastFrame = performance.now();
+let accumulator = 0;
+
+function loop(now) {
+  accumulator += Math.min(now - lastFrame, MAX_FRAME_MS);
+  lastFrame = now;
+
+  // Spread this frame's mouse movement across the steps so the handle
+  // doesn't teleport on frames that run more than one step.
+  const steps = Math.floor(accumulator / STEP_MS);
+  const fromX = handleX, fromY = handleY;
+  for (let s = 1; s <= steps; s++) {
+    handleX = lerp(fromX, mouseX, s / steps);
+    handleY = lerp(fromY, mouseY, s / steps);
+    update();
+  }
+  accumulator -= steps * STEP_MS;
+
   draw();
   requestAnimationFrame(loop);
 }
-loop();
+requestAnimationFrame(loop);
 
 // ── IPC from main process ───────────────────────────────────────────────────
-window.bridge.onSpawnWhip(() => {
-  whip = spawnWhip(mouseX || W / 2, mouseY || H / 2);
+window.bridge.onSpawnWhip(pos => {
+  // Main sends the cursor position: the overlay may have just moved to
+  // another display, and no mousemove has fired there yet.
+  if (pos) { mouseX = pos.x; mouseY = pos.y; }
+  if (!mouseX && !mouseY) { mouseX = W / 2; mouseY = H / 2; }
+  whip = spawnWhip(mouseX, mouseY);
   dropping = false;
-  prevMouseX = mouseX;
-  prevMouseY = mouseY;
+  handleX = prevHandleX = mouseX;
+  handleY = prevHandleY = mouseY;
   handleAngle = P.baseTargetAngle;
   handleAngVel = 0;
 });
 
 window.bridge.onDropWhip(() => {
   if (whip && !dropping) dropping = true;
+});
+
+window.bridge.onSettings(settings => {
+  soundEnabled = settings.sound;
 });
 
 </script>
